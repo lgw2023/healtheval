@@ -43,11 +43,14 @@ class LLMScorer:
         prompt_manager: PromptManager,
         cache: Optional[JSONCache] = None,
         templater: Optional[InputTemplater] = None,
+        verbose: bool = False,
     ):
         self.caller = caller
         self.prompt_manager = prompt_manager
         self.cache = cache
         self.templater = templater or InputTemplater()
+        # 当 verbose=True 时，在打分阶段输出单条推理的可视化信息
+        self.verbose = verbose
 
     def score_sample(
         self,
@@ -87,18 +90,33 @@ class LLMScorer:
                     raw_response = self.caller(prompt, temperature, top_k, top_p, run_idx + repeat_idx)
                     if self.cache:
                         self.cache.set(cache_key, raw_response)
-                scores.append(
-                    AnswerScore(
-                        sample_id=sample.sample_id,
-                        answer_id=answer_id,
-                        human_winner=sample.winner,
-                        prompt_version=prompt_version,
-                        decode_params={"temperature": temperature, "top_k": top_k, "top_p": top_p},
-                        raw_response=raw_response,
-                        parsed=self._parse_response(raw_response),
-                        run_idx=run_idx + repeat_idx,
-                    )
+
+                parsed = self._parse_response(raw_response)
+                score_obj = AnswerScore(
+                    sample_id=sample.sample_id,
+                    answer_id=answer_id,
+                    human_winner=sample.winner,
+                    prompt_version=prompt_version,
+                    decode_params={"temperature": temperature, "top_k": top_k, "top_p": top_p},
+                    raw_response=raw_response,
+                    parsed=parsed,
+                    run_idx=run_idx + repeat_idx,
                 )
+                scores.append(score_obj)
+
+                if self.verbose:
+                    total = parsed.total_score if parsed else None
+                    conf = parsed.confidence if parsed else None
+                    preview = (answer[:40] + "...") if len(answer) > 40 else answer
+                    print(
+                        f"[LLMScorer] sample={sample.sample_id} answer={answer_id} "
+                        f"run={run_idx + repeat_idx} prompt={prompt_version} "
+                        f"temp={temperature} top_k={top_k} top_p={top_p} "
+                        f"total_score={total} confidence={conf} | answer_preview={preview}"
+                    )
+                    print(raw_response)
+
+
         return scores
 
     def _parse_response(self, raw: str) -> Optional[Score]:

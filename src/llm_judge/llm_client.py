@@ -46,6 +46,43 @@ class OpenAILikeCaller:
         self.config = config
         self.timeout = timeout
 
+        # 如果存在代理相关环境变量，则显式为 urllib 配置 ProxyHandler，
+        # 确保所有模型调用都严格走代理（例如本地 Clash / Surge 等）。
+        http_proxy = os.getenv("http_proxy") or os.getenv("HTTP_PROXY")
+        https_proxy = os.getenv("https_proxy") or os.getenv("HTTPS_PROXY")
+        proxies: Dict[str, str] = {}
+        if http_proxy:
+            proxies["http"] = http_proxy
+        if https_proxy:
+            proxies["https"] = https_proxy
+
+        if proxies:
+            proxy_handler = urllib.request.ProxyHandler(proxies)
+            self._opener = urllib.request.build_opener(proxy_handler)
+        else:
+            # 不配置代理时使用默认 opener
+            self._opener = urllib.request.build_opener()
+
+    @property
+    def _endpoint(self) -> str:
+        """Normalize endpoint to support both base-url and full-path configs.
+
+        DeepInfra 提供的 OpenAI 兼容接口通常是::
+
+            https://api.deepinfra.com/v1/openai/chat/completions
+
+        但本项目通过环境变量传入的可能只是 ``https://api.deepinfra.com/v1/openai``。
+        为了兼容两种写法，这里做一个轻量级归一化：
+
+        - 如果 URL 中已经包含 ``chat/completions``，则原样使用；
+        - 否则在末尾补上 ``/chat/completions``。
+        """
+
+        base = self.config.url.rstrip("/")
+        if "chat/completions" in base:
+            return base
+        return f"{base}/chat/completions"
+
     def __call__(
         self, prompt: str, temperature: float, top_k: int | None, top_p: float | None, seed: int
     ) -> str:
@@ -72,12 +109,13 @@ class OpenAILikeCaller:
             "Content-Type": "application/json",
         }
         request = urllib.request.Request(
-            self.config.url,
+            self._endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        # 统一通过初始化时构造的 opener 发起请求，以便自动应用代理设置
+        with self._opener.open(request, timeout=self.timeout) as response:
             resp_text = response.read().decode("utf-8")
         try:
             data = json.loads(resp_text)
