@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,23 @@ from llm_judge.llm_client import build_llm_caller
 from llm_judge.pipeline import EvaluationPipeline
 from llm_judge.prompt_manager import PromptManager
 from llm_judge.sampling import DecodeConfig
+
+
+def _validate_llm_env() -> None:
+    """Ensure required environment variables for LLM calling exist.
+
+    The evaluation should stop early with a clear message when credentials are
+    missing to avoid partially executed runs or unclear stack traces.
+    """
+
+    required = ["LLM_MODEL_URL", "LLM_MODEL_NAME", "LLM_MODEL_API_KEY"]
+    missing = [name for name in required if not os.getenv(name)]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise SystemExit(
+            f"Missing required environment variables for LLM access: {missing_list}. "
+            "Set them or rerun with --mock to use the offline scorer."
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +56,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not args.mock:
+        _validate_llm_env()
     caller = build_llm_caller(mock=args.mock)
     prompt_manager = PromptManager.default_manager()
     configs = [
