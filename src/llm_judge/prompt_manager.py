@@ -29,7 +29,10 @@ class PromptManager:
 
     def render(self, name: str, variables: Mapping[str, str]) -> str:
         version = self.get(name)
-        return version.template.format(**variables)
+        content = version.template
+        for key, value in variables.items():
+            content = content.replace(f"{{{key}}}", value)
+        return content
 
     @classmethod
     def default_manager(cls) -> "PromptManager":
