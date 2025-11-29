@@ -34,11 +34,24 @@ class CSVDataLoader:
 
     The loader keeps extra columns in ``Sample.extra`` so downstream modules can
     use teacher-model context or RAG traces without changing core parsing logic.
+
+    Column names are normalized to support both英文/中文字段。可覆盖 ``column_mapping``
+    以匹配新的数据格式。
     """
 
-    def __init__(self, path: Path, id_column: str = "id"):
+    DEFAULT_COLUMN_MAPPING = {
+        "query": ["query", "典型query", "question"],
+        "last_answer_phone": ["last_answer_phone", "last_answer"],
+        "modules_block": ["modules_block"],
+        "a_answer": ["a_answer", "answer_a"],
+        "b_answer": ["b_answer", "answer_b"],
+        "winner": ["winner"],
+    }
+
+    def __init__(self, path: Path, id_column: str = "id", column_mapping: Optional[dict] = None):
         self.path = Path(path)
         self.id_column = id_column
+        self.column_mapping = column_mapping or self.DEFAULT_COLUMN_MAPPING
 
     def load(self, limit: Optional[int] = None) -> List[Sample]:
         rows: List[Sample] = []
@@ -50,22 +63,30 @@ class CSVDataLoader:
                 sample_id = row.get(self.id_column) or str(idx)
                 sample = Sample(
                     sample_id=sample_id,
-                    query=row.get("query", ""),
-                    last_answer_phone=row.get("last_answer_phone") or None,
-                    modules_block=row.get("modules_block")
+                    query=self._get_first(row, "query"),
+                    last_answer_phone=self._get_first(row, "last_answer_phone") or None,
+                    modules_block=self._get_first(row, "modules_block")
                     or self._compose_modules_block(row),
-                    a_answer=row.get("a_answer", ""),
-                    b_answer=row.get("b_answer", ""),
-                    winner=(row.get("winner") or "").strip(),
-                    extra={k: v for k, v in row.items() if k not in {
-                        self.id_column,
-                        "query",
-                        "last_answer_phone",
-                        "modules_block",
-                        "a_answer",
-                        "b_answer",
-                        "winner",
-                    }},
+                    a_answer=self._get_first(row, "a_answer"),
+                    b_answer=self._get_first(row, "b_answer"),
+                    winner=(self._get_first(row, "winner") or "").strip(),
+                    extra={
+                        k: v
+                        for k, v in row.items()
+                        if k
+                        not in {
+                            self.id_column,
+                            *self.column_mapping.get("query", []),
+                            *self.column_mapping.get("last_answer_phone", []),
+                            *self.column_mapping.get("modules_block", []),
+                            *self.column_mapping.get("a_answer", []),
+                            *self.column_mapping.get("b_answer", []),
+                            *self.column_mapping.get("winner", []),
+                            "data",
+                            "suggest",
+                            "rag",
+                        }
+                    },
                 )
                 rows.append(sample)
         return rows
@@ -77,6 +98,13 @@ class CSVDataLoader:
             if row.get(key):
                 parts.append(f"[{key}]\n{row[key]}")
         return "\n\n".join(parts)
+
+    def _get_first(self, row: dict, logical_name: str) -> str:
+        candidates = self.column_mapping.get(logical_name, [])
+        for name in candidates:
+            if name in row and row[name] is not None:
+                return row[name]
+        return ""
 
 
 def batched(iterable: Iterable[Sample], batch_size: int) -> Iterable[List[Sample]]:
