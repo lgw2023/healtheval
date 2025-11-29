@@ -70,15 +70,20 @@ GROUND_PROMPT_TPL = """
 
 ## 仅输出 JSON（单个对象，不要多余文本）
 **重要提示：JSON 字符串值内部的双引号必须转义（例如 \"），或者直接使用单引号。**
+**- 对于每一条 ``checks`` 里的规则，请输出 ``score`` 字段，范围为 0~5，分数越高代表该维度表现越好：**
+**  - 0 分：严重不符合 / 完全错误**
+**  - 1~2 分：存在明显问题或多个瑕疵**
+**  - 3~4 分：基本符合，仅有轻微问题或边缘情况**
+**  - 5 分：完全符合、无明显问题**
 {
   "checks": [
-    {"rule_id":"PERSONAL_DATA_MISMATCH","hit":true|false,"severity":"strict","reason":"(若含引号请用单引号)","excerpt":"(若含引号请用单引号)"},
-    {"rule_id":"COURSE_LIB_MISSING","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"NUM_COMPARE_ERROR","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"ARITH_ERROR","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"CONTRADICT_KB_OR_EXPERT","hit":true|false,"severity":"minor|major","reason":"...","excerpt":"..."},
-    {"rule_id":"FACT_LOGIC_ISSUE","hit":true|false,"severity":"minor|major","reason":"...","excerpt":"..."},
-    {"rule_id":"IRRELEVANT","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."}
+    {"rule_id":"PERSONAL_DATA_MISMATCH","score":0~5,"severity":"strict","reason":"(若含引号请用单引号)","excerpt":"(若含引号请用单引号)"},
+    {"rule_id":"COURSE_LIB_MISSING","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
+    {"rule_id":"NUM_COMPARE_ERROR","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
+    {"rule_id":"ARITH_ERROR","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
+    {"rule_id":"CONTRADICT_KB_OR_EXPERT","score":0~5,"severity":"minor|major","reason":"...","excerpt":"..."},
+    {"rule_id":"FACT_LOGIC_ISSUE","score":0~5,"severity":"minor|major","reason":"...","excerpt":"..."},
+    {"rule_id":"IRRELEVANT","score":0~5,"severity":"strict","reason":"...","excerpt":"..."}
   ],
   "confidence": <0~1 的数字>
 }
@@ -142,20 +147,25 @@ STRUCT_PROMPT_TPL = """
 
 ## 仅输出 JSON（单个对象，不要多余文本）
 **重要提示：JSON 字符串值内部的双引号必须转义（例如 \"），或者直接使用单引号。**
+**- 对于每一条 ``checks`` 里的规则，请输出 ``score`` 字段，范围为 0~5，分数越高代表该维度表现越好：**
+**  - 0 分：严重不符合 / 完全错误（结构缺失、排版极差等）**
+**  - 1~2 分：存在明显问题或多个结构性缺陷**
+**  - 3~4 分：基本达标，仅有轻微或局部问题**
+**  - 5 分：结构完整、排版良好、体验优良**
 {
   "checks": [
-    {"rule_id":"EMPTY_OR_INCOMPLETE","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"ILLEGAL_CONTENT","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"SENSITIVE_ADVICE","hit":true|false,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"NO_MARKDOWN","hit":true|false,"severity":"fixed","reason":"...","excerpt":"..."},
-    {"rule_id":"BAD_MARKDOWN_USAGE","hit":true|false,"severity":"fixed","reason":"格式错误/效果差","excerpt":"..."},
-    {"rule_id":"BURIED_CORE_ANSWER","hit":true|false,"severity":"fixed","reason":"核心结论未前置","excerpt":"..."},
-    {"rule_id":"UNNATURAL_TONE","hit":true|false,"severity":"fixed","reason":"语气生硬/缺乏拟人化","excerpt":"..."},
-    {"rule_id":"LACK_VISUAL_AID","hit":true|false,"severity":"fixed","reason":"缺乏Emoji/图表丰富度","excerpt":"..."},
-    {"rule_id":"THIN_CONTENT","hit":true|false,"severity":"fixed","reason":"内容单薄/丰富度不足","excerpt":"..."},
-    {"rule_id":"PERSONAL_DATA_ANALYSIS_ISSUE","hit":true|false,"severity":"fixed","reason":"...","excerpt":"..."},
-    {"rule_id":"REDUNDANT","hit":true|false,"severity":"fixed","reason":"...","excerpt":"..."},
-    {"rule_id":"GRAMMAR","hit":true|false,"severity":"fixed","reason":"...","excerpt":"..."}
+    {"rule_id":"EMPTY_OR_INCOMPLETE","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
+    {"rule_id":"ILLEGAL_CONTENT","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
+    {"rule_id":"SENSITIVE_ADVICE","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
+    {"rule_id":"NO_MARKDOWN","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."},
+    {"rule_id":"BAD_MARKDOWN_USAGE","score":0~5,"severity":"fixed","reason":"格式错误/效果差","excerpt":"..."},
+    {"rule_id":"BURIED_CORE_ANSWER","score":0~5,"severity":"fixed","reason":"核心结论未前置","excerpt":"..."},
+    {"rule_id":"UNNATURAL_TONE","score":0~5,"severity":"fixed","reason":"语气生硬/缺乏拟人化","excerpt":"..."},
+    {"rule_id":"LACK_VISUAL_AID","score":0~5,"severity":"fixed","reason":"缺乏Emoji/图表丰富度","excerpt":"..."},
+    {"rule_id":"THIN_CONTENT","score":0~5,"severity":"fixed","reason":"内容单薄/丰富度不足","excerpt":"..."},
+    {"rule_id":"PERSONAL_DATA_ANALYSIS_ISSUE","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."},
+    {"rule_id":"REDUNDANT","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."},
+    {"rule_id":"GRAMMAR","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."}
   ],
   "confidence": <0~1 的数字>
 }

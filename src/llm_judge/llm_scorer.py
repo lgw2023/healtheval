@@ -19,7 +19,27 @@ class Score:
 
     @property
     def total_score(self) -> float:
-        return sum(1.0 for check in self.checks if check.get("hit"))
+        """Aggregate per-rule scores into a single numeric value.
+
+        新版提示词约定每条规则返回 ``score`` 字段（0~5，分数越高表现越好）。
+        为了兼容历史缓存数据，这里同时支持两种格式：
+        - 如果存在 ``score``，则按浮点数累加；
+        - 否则退回到旧版的 ``hit`` 布尔计数（True 记 1 分）。
+        """
+
+        total = 0.0
+        for check in self.checks:
+            if not isinstance(check, dict):
+                continue
+            if "score" in check:
+                try:
+                    total += float(check.get("score", 0) or 0)
+                except (TypeError, ValueError):
+                    # 非法数值直接视作 0 分
+                    continue
+            elif check.get("hit"):
+                total += 1.0
+        return total
 
 
 @dataclass

@@ -146,12 +146,12 @@ class MockLLMCaller:
     ) -> str:
         rng_seed = int(hashlib.md5(f"{prompt}|{seed}".encode("utf-8")).hexdigest(), 16)
         rng = random.Random(rng_seed)
-        # Make the number of hits dependent on sampling params to mimic variability.
-        variability = rng.randint(0, self.rules)
+        # 为了模拟“评分型”裁判，这里直接为每条规则生成 0~5 的整数分数，
+        # 分数越高代表该维度表现越好；不同采样参数会间接影响随机种子。
         checks = [
             {
                 "rule_id": f"MOCK_RULE_{idx}",
-                "hit": idx < variability,
+                "score": rng.randint(0, 5),
                 "severity": "strict",
                 "reason": "mock",
                 "excerpt": "",
