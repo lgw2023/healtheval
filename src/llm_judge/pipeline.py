@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, Sequence
 
 from .cache import JSONCache
 from .data_loader import CSVDataLoader, Sample
@@ -34,14 +34,16 @@ class EvaluationPipeline:
         configs: Iterable[DecodeConfig],
         repeats: int,
         limit: int | None = None,
+        seeds: Sequence[int] | None = None,
     ) -> dict[DecodeConfig, EvaluationReport]:
+        config_list = list(configs)
         samples = self.loader.load(limit=limit)
-        controller = SamplingController()
-        reports: dict[DecodeConfig, EvaluationReport] = {}
-        for seed, config in controller.iter_runs(configs, repeats=repeats):
-            answers: List[AnswerScore] = []
+        controller = SamplingController(seeds=seeds)
+        grouped_answers: dict[DecodeConfig, List[AnswerScore]] = {cfg: [] for cfg in config_list}
+
+        for seed, config in controller.iter_runs(config_list, repeats=repeats):
             for sample in samples:
-                answers.extend(
+                grouped_answers.setdefault(config, []).extend(
                     self.scorer.score_sample(
                         sample,
                         prompt_version=config.prompt_version,
@@ -52,6 +54,9 @@ class EvaluationPipeline:
                         repeats=1,
                     )
                 )
+
+        reports: dict[DecodeConfig, EvaluationReport] = {}
+        for config, answers in grouped_answers.items():
             reports[config] = self.report_builder.summarize(answers)
         if self.cache:
             self.cache.flush()
