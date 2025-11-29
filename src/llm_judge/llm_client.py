@@ -59,10 +59,11 @@ class OpenAILikeCaller:
                 {"role": "user", "content": prompt},
             ],
             "temperature": temperature,
-            "top_p": top_p,
         }
         if top_k is not None:
             payload["top_k"] = top_k
+        if top_p is not None:
+            payload["top_p"] = top_p
         # Some providers support deterministic seeds; send it when available.
         payload["seed"] = seed
 
