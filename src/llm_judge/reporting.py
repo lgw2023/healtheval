@@ -22,11 +22,28 @@ class EvaluationReport:
 
 
 class ReportBuilder:
-    def __init__(self, metrics: MetricsComputer | None = None):
-        self.metrics = metrics or MetricsComputer()
+    def __init__(self, metrics: MetricsComputer | None = None, debug_metrics: bool = False):
+        """构建评估报告的辅助类。
+
+        - ``metrics``：可注入自定义的 ``MetricsComputer`` 实现；
+        - ``debug_metrics``：当为 True 时，将在指标计算过程中输出与 task.md 对应的
+          详细中间计算步骤，便于可视化理解。
+        """
+
+        # 如果外部没有显式传入 MetricsComputer，则根据 debug_metrics 创建默认实例
+        self.metrics = metrics or MetricsComputer(debug=debug_metrics)
+        self._debug = debug_metrics
 
     def summarize(self, answers: Iterable[AnswerScore]) -> EvaluationReport:
         answers_list = list(answers)
+        if self._debug:
+            print("\n[Report] ===== 开始计算当前配置的三类指标 =====")
+            print(f"[Report] 样本答案条数（含 A/B 和多轮采样）={len(answers_list)}")
+            print("[Report] 对应 task.md 中的三个部分：")
+            print("          1) 单条打分稳定性 (Krippendorff’s α)")
+            print("          2) 成对比较一致性 (pair-accuracy + tie 率)")
+            print("          3) 总体数据一致性 (Alt-Test, 卡方统计与 p-value)")
+
         stability = self._aggregate_scores(answers_list)
         alpha = self.metrics.krippendorff_alpha_interval(stability)
         decisions: List[PairDecision] = self.metrics.build_pair_decisions(answers_list)
@@ -42,6 +59,24 @@ class ReportBuilder:
             if hw in human_counts:
                 human_counts[hw] += 1
 
+        if self._debug:
+            print("\n[Report] ===== 指标汇总结果（与 task.md 对齐）=====")
+            print(f"[Report]  单条打分稳定性 α={alpha:.6f}")
+            print(
+                "[Report]  成对比较一致性: "
+                f"pair-accuracy={pair_acc:.6f}, tie_rate={tie_rate:.6f}"
+            )
+            print(
+                "[Report]  Alt-Test: chi_square={:.6f}, p_value={:.6f}".format(
+                    chi_square, p_value
+                )
+            )
+            print(
+                "[Report]  胜负分布: "
+                f"human A={human_counts.get('A', 0)}, B={human_counts.get('B', 0)}; "
+                f"llm   A={llm_counts.get('A', 0)}, B={llm_counts.get('B', 0)}"
+            )
+
         return EvaluationReport(
             alpha=alpha,
             pair_accuracy=pair_acc,
@@ -56,10 +91,54 @@ class ReportBuilder:
 
     @staticmethod
     def _aggregate_scores(answers: List[AnswerScore]) -> Dict[str, List[float]]:
+        """将 LLM 的结构化评分展开为「细粒度评分单元」并按单元聚合。
+
+        旧实现：以 (sample_id, answer_id) 为单位，把每次打分的 total_score
+        作为 Krippendorff’s α 的观测值。
+
+        新实现：以「单次打分中的每一条规则项」为最小单位，即：
+        - 每个评分单元对应 (sample_id, answer_id, rule_id)；
+        - 对同一评分单元在多次采样下的得分列表计算 α；
+        - 得分优先使用 ``check['score']``（0~5 区间），若无则退回到布尔命中
+          ``check['hit']``（映射为 0/1）。
+        """
+
         stability: Dict[str, List[float]] = {}
+
         for answer in answers:
-            score = answer.parsed.total_score if answer.parsed else None
-            stability.setdefault(answer.sample_id + answer.answer_id, []).append(score)
+            parsed = answer.parsed
+            if parsed is None:
+                continue
+
+            for idx, check in enumerate(parsed.checks):
+                if not isinstance(check, dict):
+                    continue
+
+                # 1) 优先使用新版提示词的区间型得分字段 "score"
+                if "score" in check:
+                    try:
+                        rating = float(check.get("score", 0) or 0)
+                    except (TypeError, ValueError):
+                        # 非法数值直接跳过该条规则项
+                        continue
+                # 2) 兼容旧版布尔命中格式 "hit" -> {False, True} -> {0.0, 1.0}
+                elif "hit" in check:
+                    rating = 1.0 if bool(check.get("hit")) else 0.0
+                else:
+                    # 既没有 score 也没有 hit，无法形成可比较的区间得分
+                    continue
+
+                # 规则项标识：优先 rule_id，其次 name / rule，最后退回到索引
+                rule_id = (
+                    check.get("rule_id")
+                    or check.get("name")
+                    or check.get("rule")
+                    or str(idx)
+                )
+
+                unit_id = f"{answer.sample_id}{answer.answer_id}:{rule_id}"
+                stability.setdefault(unit_id, []).append(rating)
+
         return stability
 
     @staticmethod

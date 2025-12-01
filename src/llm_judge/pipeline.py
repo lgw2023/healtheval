@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterable, List, Mapping, Sequence
+from typing import Any, Callable, Iterable, List, Mapping, Sequence
 
 from .cache import JSONCache
 from .data_loader import CSVDataLoader, Sample
@@ -35,7 +35,42 @@ class EvaluationPipeline:
             templater=templater,
             verbose=verbose,
         )
-        self.report_builder = ReportBuilder()
+        # 当 verbose=True 时，也在指标统计阶段输出 task.md 中三类指标的详细计算过程
+        self.report_builder = ReportBuilder(debug_metrics=verbose)
+
+    def describe(
+        self,
+        configs: Iterable[DecodeConfig],
+        repeats: int,
+        limit: int | None = None,
+        seeds: Sequence[int] | None = None,
+        combine_weights: Mapping[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Return a structured view of the current pipeline and run configuration.
+
+        便于在脚本或 Notebook 中以 JSON / dict 的方式查看整体设定，而不是零散的日志。
+        """
+
+        config_list = list(configs)
+        return {
+            "data_path": str(self.loader.path),
+            "cache_path": str(getattr(self.cache, "path", "")) if self.cache else None,
+            "prompt_versions": [cfg.prompt_version for cfg in config_list],
+            "decode_configs": [
+                {
+                    "prompt_version": cfg.prompt_version,
+                    "temperature": cfg.temperature,
+                    "top_k": cfg.top_k,
+                    "top_p": cfg.top_p,
+                }
+                for cfg in config_list
+            ],
+            "repeats": repeats,
+            "limit": limit,
+            "seeds": list(seeds) if seeds is not None else None,
+            "combine_weights": dict(combine_weights) if combine_weights is not None else None,
+            "verbose": self.verbose,
+        }
 
     def run(
         self,
@@ -57,14 +92,16 @@ class EvaluationPipeline:
         # 记录每个配置已经运行的轮次，便于可视化展示
         run_counters: dict[DecodeConfig, int] = {cfg: 0 for cfg in config_list}
 
-        for seed, config in controller.iter_runs(config_list, repeats=repeats):
+        # 这里我们将 repeats 的语义专门用于“单条样本多次打分”（Krippendorff α 所需），
+        # 因此外层按配置/seed 的迭代固定为 1 轮，以避免不必要的重复调用和覆盖。
+        for seed, config in controller.iter_runs(config_list, repeats=1):
             run_counters[config] += 1
             current_round = run_counters[config]
             if self.verbose:
                 print(
                     f"[Pipeline] Config prompt={config.prompt_version} "
                     f"temp={config.temperature} top_k={config.top_k} top_p={config.top_p} "
-                    f"round={current_round}/{repeats} seed={seed}"
+                    f"round={current_round}/1 seed={seed}"
                 )
 
             for idx, sample in enumerate(samples, start=1):
@@ -83,7 +120,8 @@ class EvaluationPipeline:
                         top_k=config.top_k,
                         top_p=config.top_p,
                         run_idx=seed,
-                        repeats=1,
+                        # repeats 用于同一 (sample, answer) 的多次打分，从而支撑单条打分稳定性 (α)
+                        repeats=repeats,
                     )
                 )
 

@@ -17,6 +17,27 @@ class Score:
     checks: List[dict]
     confidence: float
 
+    @staticmethod
+    def from_dict(payload: Mapping | None) -> "Score | None":
+        """从字典结构安全地还原为 ``Score`` 对象。
+
+        主要用于从缓存中读回已经存储好的解析结果。
+        """
+
+        if payload is None or not isinstance(payload, Mapping):
+            return None
+
+        checks = payload.get("checks", [])
+        if not isinstance(checks, list):
+            checks = []
+
+        try:
+            confidence = float(payload.get("confidence", 0) or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        return Score(checks=checks, confidence=confidence)
+
     @property
     def total_score(self) -> float:
         """Aggregate per-rule scores into a single numeric value.
@@ -96,8 +117,39 @@ class LLMScorer:
                     run_idx=run_idx + repeat_idx,
                 )
                 cached = self.cache.get(cache_key) if self.cache else None
+                raw_response: str
+
+                # 1. 命中缓存：支持两种历史格式
                 if cached is not None:
-                    raw_response = cached
+                    if isinstance(cached, dict):
+                        # 新版：结构化缓存
+                        raw_response = str(cached.get("raw_response", ""))
+                        # 优先使用结构化 parsed 字段，还原为 Score；否则退回到重新解析 raw_response
+                        parsed = Score.from_dict(cached.get("parsed")) or self._parse_response(raw_response)
+                    else:
+                        # 旧版：仅字符串形式的 LLM 原始回复
+                        raw_response = str(cached)
+                        parsed = self._parse_response(raw_response)
+                        # 兼容迁移：在读取旧缓存时，自动升级为结构化格式，写回 cache 文件
+                        if self.cache:
+                            self.cache.set(
+                                cache_key,
+                                self._build_cache_entry(
+                                    sample=sample,
+                                    answer=answer,
+                                    answer_id=answer_id,
+                                    prompt_version=prompt_version,
+                                    temperature=temperature,
+                                    top_k=top_k,
+                                    top_p=top_p,
+                                    run_idx=run_idx + repeat_idx,
+                                    tpl_result=tpl_result,
+                                    raw_response=raw_response,
+                                    parsed=parsed,
+                                ),
+                            )
+
+                # 2. 未命中缓存：实际调用大模型并写入结构化缓存
                 else:
                     prompt = self.prompt_manager.render(
                         prompt_version,
@@ -108,10 +160,25 @@ class LLMScorer:
                         ),
                     )
                     raw_response = self.caller(prompt, temperature, top_k, top_p, run_idx + repeat_idx)
+                    parsed = self._parse_response(raw_response)
                     if self.cache:
-                        self.cache.set(cache_key, raw_response)
+                        self.cache.set(
+                            cache_key,
+                            self._build_cache_entry(
+                                sample=sample,
+                                answer=answer,
+                                answer_id=answer_id,
+                                prompt_version=prompt_version,
+                                temperature=temperature,
+                                top_k=top_k,
+                                top_p=top_p,
+                                run_idx=run_idx + repeat_idx,
+                                tpl_result=tpl_result,
+                                raw_response=raw_response,
+                                parsed=parsed,
+                            ),
+                        )
 
-                parsed = self._parse_response(raw_response)
                 score_obj = AnswerScore(
                     sample_id=sample.sample_id,
                     answer_id=answer_id,
@@ -127,27 +194,90 @@ class LLMScorer:
                 if self.verbose:
                     total = parsed.total_score if parsed else None
                     conf = parsed.confidence if parsed else None
+                    seed = run_idx
+                    repeat_no = repeat_idx + 1
                     preview = (answer[:40] + "...") if len(answer) > 40 else answer
                     print(
                         f"[LLMScorer] sample={sample.sample_id} answer={answer_id} "
-                        f"run={run_idx + repeat_idx} prompt={prompt_version} "
-                        f"temp={temperature} top_k={top_k} top_p={top_p} "
+                        f"seed={seed} repeat={repeat_no}/{repeats} "
+                        f"prompt={prompt_version} temp={temperature} top_k={top_k} top_p={top_p} "
                         f"total_score={total} confidence={conf} | answer_preview={preview}"
                     )
-                    print(raw_response)
+                    print(parsed)
 
 
         return scores
 
+    def _build_cache_entry(
+        self,
+        sample: Sample,
+        answer: str,
+        answer_id: str,
+        prompt_version: str,
+        temperature: float,
+        top_k: int | None,
+        top_p: float | None,
+        run_idx: int,
+        tpl_result,
+        raw_response: str,
+        parsed: Optional[Score],
+    ) -> Dict:
+        """构造写入缓存文件的完整记录。
+
+        目标：在 ``--cache`` 指定的 JSON 文件中，详细记录每次“大模型打分调用”的
+        - 原始回复内容
+        - 解析后的评分结果
+        - 相关的实验 / 配置信息
+        - 输入样本与候选答案信息
+        """
+
+        parsed_payload: Optional[Dict] = None
+        if parsed is not None:
+            parsed_payload = {
+                "checks": parsed.checks,
+                "confidence": parsed.confidence,
+                "total_score": parsed.total_score,
+            }
+
+        return {
+            "raw_response": raw_response,
+            "parsed": parsed_payload,
+            "meta": {
+                "sample_id": sample.sample_id,
+                "answer_id": answer_id,
+                "answer": answer,
+                "human_winner": sample.winner,
+                "prompt_version": prompt_version,
+                "decode_params": {
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                },
+                # run_idx 体现了 EvaluationPipeline 中的 seed / 轮次信息
+                "run_idx": run_idx,
+                # 保留原始 CSV 中的额外字段，便于线下分析
+                "sample_extra": sample.extra,
+            },
+            "input": {
+                "query": sample.query,
+                "last_answer_phone": sample.last_answer_phone,
+                "modules_block": sample.modules_block,
+                # 模板展开后的结构化输入（如果后续模板逻辑扩展，这里也能完整记录）
+                "templated_input_data": getattr(tpl_result, "input_data", None),
+                "templated_modules_block": getattr(tpl_result, "modules_block", None),
+            },
+        }
+
     def _parse_response(self, raw: str) -> Optional[Score]:
         try:
-            payload = json.loads(raw)
+            import json_repair
+            payload = json_repair.loads(raw)
             checks = payload.get("checks", [])
             confidence = float(payload.get("confidence", 0))
             if isinstance(checks, list):
                 return Score(checks=checks, confidence=confidence)
         except (json.JSONDecodeError, TypeError, ValueError):
-            return None
+            raise ValueError(f"Failed to parse JSON response: {raw}")
         return None
 
     def flush_cache(self) -> None:
