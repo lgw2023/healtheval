@@ -35,18 +35,47 @@ class ReportBuilder:
         self._debug = debug_metrics
 
     def summarize(self, answers: Iterable[AnswerScore]) -> EvaluationReport:
+        """默认使用同一批打分数据计算三类指标。"""
+
         answers_list = list(answers)
+        return self._summarize_from_sources(
+            stability_source=answers_list, decision_source=answers_list
+        )
+
+    def summarize_from_separate_sources(
+        self,
+        *,
+        stability_source: Iterable[AnswerScore],
+        decision_source: Iterable[AnswerScore],
+    ) -> EvaluationReport:
+        """支持将稳定性与成对比较指标拆分为不同的数据来源。"""
+
+        stability_list = list(stability_source)
+        decisions_list = list(decision_source)
+        return self._summarize_from_sources(
+            stability_source=stability_list, decision_source=decisions_list
+        )
+
+    def _summarize_from_sources(
+        self,
+        *,
+        stability_source: List[AnswerScore],
+        decision_source: List[AnswerScore],
+    ) -> EvaluationReport:
         if self._debug:
             print("\n[Report] ===== 开始计算当前配置的三类指标 =====")
-            print(f"[Report] 样本答案条数（含 A/B 和多轮采样）={len(answers_list)}")
+            print(
+                f"[Report] 单条打分稳定性观测条数={len(stability_source)}, "
+                f"成对比较观测条数={len(decision_source)}"
+            )
             print("[Report] 对应 task.md 中的三个部分：")
             print("          1) 单条打分稳定性 (Krippendorff’s α)")
             print("          2) 成对比较一致性 (pair-accuracy + tie 率)")
             print("          3) 总体数据一致性 (Alt-Test, 卡方统计与 p-value)")
 
-        stability = self._aggregate_scores(answers_list)
+        stability = self._aggregate_scores(stability_source)
         alpha = self.metrics.krippendorff_alpha_interval(stability)
-        decisions: List[PairDecision] = self.metrics.build_pair_decisions(answers_list)
+        decisions: List[PairDecision] = self.metrics.build_pair_decisions(decision_source)
         pair_acc, tie_rate = self.metrics.pair_accuracy(decisions)
         chi_square, p_value = self.metrics.alt_test(decisions)
 
@@ -83,7 +112,7 @@ class ReportBuilder:
             tie_rate=tie_rate,
             chi_square=chi_square,
             alt_test_p=p_value,
-            num_answers=len(answers_list),
+            num_answers=len(stability_source),
             num_decisions=len(decisions),
             llm_winner_counts=llm_counts,
             human_winner_counts=human_counts,
