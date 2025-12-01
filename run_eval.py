@@ -88,15 +88,24 @@ def main() -> None:
         prompt_manager=prompt_manager,
         verbose=args.verbose,
     )
-    reports = pipeline.run(configs=configs, repeats=args.repeats, limit=args.limit, seeds=[42])
+    reports = pipeline.run(
+        configs=configs,
+        repeats=args.repeats,
+        limit=args.limit,
+        seeds=[42],
+        combine_weights={"ground": 2.0, "structure": 1.0},
+    )
 
     print("\n========== EVALUATION SUMMARY ==========")
     for config, report in reports.items():
         print("---- 配置 ----")
-        print(
-            f"Prompt={config.prompt_version} | temp={config.temperature} | "
-            f"top_k={config.top_k} | top_p={config.top_p}"
-        )
+        if isinstance(config, str):
+            print(f"Prompt={config} | temp={args.temperature} | top_k={args.top_k} | top_p={args.top_p}")
+        else:
+            print(
+                f"Prompt={config.prompt_version} | temp={config.temperature} | "
+                f"top_k={config.top_k} | top_p={config.top_p}"
+            )
         print("---- 指标 ----")
         # 使用 ReportBuilder 的 pretty 文本输出，展示更多统计信息
         print(ReportBuilder.to_pretty_text(report))
