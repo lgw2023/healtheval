@@ -180,8 +180,8 @@ class EvaluationPipeline:
                 weight = weights.get(prompt, 0.0)
                 if weight <= 0 or ans.parsed is None:
                     continue
-                total_score = ans.parsed.total_score
-                weighted_total += weight * total_score
+                avg_score = ans.parsed.average_score
+                weighted_total += weight * avg_score
                 weighted_confidence += weight * (ans.parsed.confidence or 0.0)
                 total_weight += weight
 

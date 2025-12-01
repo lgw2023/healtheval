@@ -29,7 +29,7 @@ class MetricsComputer:
     为了**可视化 task.md 中描述的三类指标计算逻辑**，本类在 debug 模式下会打印
     详细的中间结果，包括：
     - 单条打分稳定性：每个样本在多次采样下的打分列表、DO/DE 分解和最终 α；
-    - 成对比较一致性：每条样本 (A,B) 的总分、LLM 判定胜者、人工 winner 及是否命中；
+    - 成对比较一致性：每条样本 (A,B) 的平均得分、LLM 判定胜者、人工 winner 及是否命中；
     - Alt-Test：人工与 LLM 在 A/B 胜负上的计数、卡方每一项贡献及最终 p-value。
     """
 
@@ -97,7 +97,7 @@ class MetricsComputer:
         return alpha
 
     def build_pair_decisions(self, answers: Iterable[AnswerScore]) -> List[PairDecision]:
-        """将每条样本在一次运行中的 (A,B) 总分配成成对决策。
+        """将每条样本在一次运行中的 (A,B) 平均得分配成成对决策。
 
         对应 task.md 的「成对比较一致性：与 winner 的方向是否一致」。
         """
@@ -112,8 +112,8 @@ class MetricsComputer:
             b_score = pair.get("B")
             if not a_score or not b_score:
                 continue
-            score_a = a_score.parsed.total_score if a_score.parsed else 0.0
-            score_b = b_score.parsed.total_score if b_score.parsed else 0.0
+            score_a = a_score.parsed.average_score if a_score.parsed else 0.0
+            score_b = b_score.parsed.average_score if b_score.parsed else 0.0
             human_winner = a_score.human_winner or b_score.human_winner
             decisions.append(
                 PairDecision(
@@ -126,12 +126,12 @@ class MetricsComputer:
             )
 
         if self.debug:
-            print("\n[Metrics] ==== 成对比较：每条样本 (A,B) 的总分与胜负方向 ====")
+            print("\n[Metrics] ==== 成对比较：每条样本 (A,B) 的平均得分与胜负方向 ====")
             for d in decisions:
                 print(
                     "[Metrics]  "
                     f"sample={d.sample_id}, run={d.run_idx}, "
-                    f"score_A={d.score_a:.4f}, score_B={d.score_b:.4f}, "
+                    f"avg_score_A={d.score_a:.4f}, avg_score_B={d.score_b:.4f}, "
                     f"llm_winner={d.llm_winner}, human_winner={d.human_winner}"
                 )
         return decisions

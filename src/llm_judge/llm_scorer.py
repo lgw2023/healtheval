@@ -17,6 +17,20 @@ class Score:
     checks: List[dict]
     confidence: float
 
+    def _iter_numeric_scores(self) -> List[float]:
+        values: List[float] = []
+        for check in self.checks:
+            if not isinstance(check, dict):
+                continue
+            if "score" in check:
+                try:
+                    values.append(float(check.get("score", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+            elif "hit" in check:
+                values.append(1.0 if bool(check.get("hit")) else 0.0)
+        return values
+
     @staticmethod
     def from_dict(payload: Mapping | None) -> "Score | None":
         """从字典结构安全地还原为 ``Score`` 对象。
@@ -48,19 +62,18 @@ class Score:
         - 否则退回到旧版的 ``hit`` 布尔计数（True 记 1 分）。
         """
 
-        total = 0.0
-        for check in self.checks:
-            if not isinstance(check, dict):
-                continue
-            if "score" in check:
-                try:
-                    total += float(check.get("score", 0) or 0)
-                except (TypeError, ValueError):
-                    # 非法数值直接视作 0 分
-                    continue
-            elif check.get("hit"):
-                total += 1.0
-        return total
+        return sum(self._iter_numeric_scores())
+
+    @property
+    def average_score(self) -> float:
+        """Average of per-rule numeric scores.
+
+        取每条规则的得分（score 或退回 hit→0/1）的均值，便于不同
+        prompt 之间按「平均得分」进行加权融合。
+        """
+
+        values = self._iter_numeric_scores()
+        return sum(values) / len(values) if values else 0.0
 
 
 @dataclass
@@ -193,6 +206,7 @@ class LLMScorer:
 
                 if self.verbose:
                     total = parsed.total_score if parsed else None
+                    average = parsed.average_score if parsed else None
                     conf = parsed.confidence if parsed else None
                     seed = run_idx
                     repeat_no = repeat_idx + 1
@@ -201,7 +215,8 @@ class LLMScorer:
                         f"[LLMScorer] sample={sample.sample_id} answer={answer_id} "
                         f"seed={seed} repeat={repeat_no}/{repeats} "
                         f"prompt={prompt_version} temp={temperature} top_k={top_k} top_p={top_p} "
-                        f"total_score={total} confidence={conf} | answer_preview={preview}"
+                        f"average_score={average} total_score={total} confidence={conf} | "
+                        f"answer_preview={preview}"
                     )
                     print(parsed)
 
@@ -237,6 +252,7 @@ class LLMScorer:
                 "checks": parsed.checks,
                 "confidence": parsed.confidence,
                 "total_score": parsed.total_score,
+                "average_score": parsed.average_score,
             }
 
         return {
