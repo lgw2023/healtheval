@@ -33,9 +33,26 @@ class ReportBuilder:
         # 如果外部没有显式传入 MetricsComputer，则根据 debug_metrics 创建默认实例
         self.metrics = metrics or MetricsComputer(debug=debug_metrics)
         self._debug = debug_metrics
+    def summarize(
+        self,
+        answers: Iterable[AnswerScore],
+        answers_for_alpha: Iterable[AnswerScore] | None = None,
+        weight_debug: list | None = None,
+    ) -> EvaluationReport:
+        """根据一组打分结果汇总评估指标。
 
-    def summarize(self, answers: Iterable[AnswerScore]) -> EvaluationReport:
+        参数含义：
+        - ``answers``：用于成对比较、Alt-Test 等「最终决策」相关指标的答案集合，
+          在当前项目中通常是各个 prompt 按权重融合后的加权结果；
+        - ``answers_for_alpha``：用于「单条打分稳定性 (Krippendorff’s α)」的
+          原始评分集合。如果为 None，则退回使用 ``answers`` 本身。
+
+        这样可以实现：**α 基于原始 GROUND/STRUCT prompt 的逐规则打分计算，
+        而成对比较和 Alt-Test 基于加权后的最终得分计算**，两者解耦。
+        """
+
         answers_list = list(answers)
+        alpha_source_list = list(answers_for_alpha) if answers_for_alpha is not None else answers_list
         if self._debug:
             print("\n[Report] ===== 开始计算当前配置的三类指标 =====")
             print(f"[Report] 样本答案条数（含 A/B 和多轮采样）={len(answers_list)}")
@@ -44,14 +61,44 @@ class ReportBuilder:
             print("          2) 成对比较一致性 (pair-accuracy + tie 率)")
             print("          3) 总体数据一致性 (Alt-Test, 卡方统计与 p-value)")
 
-        stability = self._aggregate_scores(answers_list)
+        # α：基于更细粒度的原始评分单元（通常是各 prompt、各规则项的得分）
+        stability = self._aggregate_scores(alpha_source_list)
         alpha = self.metrics.krippendorff_alpha_interval(stability)
+
+        # 在 Krippendorff’s α 之后统一打印「加权融合：原始 prompt 得分与权重贡献」
+        # 的中间可视化结果，便于与后续 pair-accuracy / Alt-Test 的指标串联阅读。
+        if self._debug and weight_debug:
+            for meta, debug_rows, final_score, weighted_total, total_weight in weight_debug:
+                sample_id, answer_id, run_idx = meta
+                print("\n[Metrics] ==== 加权融合：原始 prompt 得分与权重贡献 ====")
+                print(
+                    "[Metrics]  加权样本: "
+                    f"sample={sample_id}, answer={answer_id}, seed={run_idx}"
+                )
+                for prompt, w, avg, contrib in debug_rows:
+                    print(
+                        "[Metrics]   - "
+                        f"prompt={prompt}, weight={w:.4f}, "
+                        f"avg_score_before_weight={avg:.4f}, "
+                        f"weight * avg_score={contrib:.4f}"
+                    )
+                print(
+                    "[Metrics]   => final_weighted_score="
+                    f"{final_score:.4f}  "
+                    "(sum(weight * avg_score) / sum(weight) = "
+                    f"{weighted_total:.4f} / {total_weight:.4f})"
+                )
+
+        # 成对比较与 Alt-Test：仍然基于「最终决策」所用的答案集合
         decisions: List[PairDecision] = self.metrics.build_pair_decisions(answers_list)
         pair_acc, tie_rate = self.metrics.pair_accuracy(decisions)
         chi_square, p_value = self.metrics.alt_test(decisions)
 
-        llm_counts = {"A": 0, "B": 0}
-        human_counts = {"A": 0, "B": 0}
+        # 统计 LLM 在 {A, B, SAME} 上的判定次数，用于总体 winner 分布展示；
+        llm_counts = {"A": 0, "B": 0, "SAME": 0}
+        # 对人工标注同时统计 A / B 胜出次数以及「平局 SAME」的数量，便于在总览中
+        # 感知数据集中“打分相同”的占比。
+        human_counts = {"A": 0, "B": 0, "SAME": 0}
         for d in decisions:
             if d.llm_winner in llm_counts:
                 llm_counts[d.llm_winner] += 1
@@ -73,8 +120,12 @@ class ReportBuilder:
             )
             print(
                 "[Report]  胜负分布: "
-                f"human A={human_counts.get('A', 0)}, B={human_counts.get('B', 0)}; "
-                f"llm   A={llm_counts.get('A', 0)}, B={llm_counts.get('B', 0)}"
+                f"human A={human_counts.get('A', 0)}, "
+                f"B={human_counts.get('B', 0)}, "
+                f"SAME={human_counts.get('SAME', 0)}; "
+                f"llm   A={llm_counts.get('A', 0)}, "
+                f"B={llm_counts.get('B', 0)}, "
+                f"SAME={llm_counts.get('SAME', 0)}"
             )
 
         return EvaluationReport(
@@ -154,9 +205,11 @@ class ReportBuilder:
             f"samples_decisions={report.num_decisions} (answers={report.num_answers})",
             "human_winner_dist: "
             f"A={report.human_winner_counts.get('A', 0)}, "
-            f"B={report.human_winner_counts.get('B', 0)}",
+            f"B={report.human_winner_counts.get('B', 0)}, "
+            f"SAME={report.human_winner_counts.get('SAME', 0)}",
             "llm_winner_dist:   "
             f"A={report.llm_winner_counts.get('A', 0)}, "
-            f"B={report.llm_winner_counts.get('B', 0)}",
+            f"B={report.llm_winner_counts.get('B', 0)}, "
+            f"SAME={report.llm_winner_counts.get('SAME', 0)}",
         ]
         return "\n".join(lines)

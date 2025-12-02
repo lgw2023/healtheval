@@ -1,1 +1,16 @@
 .env
+.DS_Store
+/__pycache__
+/src/llm_judge/__pycache__
+/src/llm_judge/__pycache__
+/.idea
+.idea/healtheval.iml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/healtheval.iml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml

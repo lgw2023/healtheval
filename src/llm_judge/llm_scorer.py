@@ -11,6 +11,11 @@ from .templates import InputTemplater
 
 LLMCaller = Callable[[str, float, int | None, float | None, int], str]
 
+try:  # 在运行环境允许的情况下，从 init_prompt 中导入各 prompt 的维度定义
+    from init_prompt import PROMPT_DIM_MAP
+except Exception:  # noqa: BLE001
+    PROMPT_DIM_MAP: dict[str, List[str]] = {}
+
 
 @dataclass
 class Score:
@@ -98,6 +103,14 @@ class LLMScorer:
         cache: Optional[JSONCache] = None,
         templater: Optional[InputTemplater] = None,
         verbose: bool = False,
+        *,
+        # 缺失打分维度的处理策略：
+        # - "fill_max": 按提示词定义的维度补齐缺失项，默认给满分；
+        # - "ignore" : 不补齐，后续指标计算仅基于模型实际输出的维度；
+        # - "retry"  : 将缺失视为一次失败，尽量触发重新打分（仅对本次 LLM 调用生效，缓存命中不重试）。
+        missing_dims_strategy: str = "fill_max",
+        # 在 "fill_max" 策略下，缺失项默认使用的分值（通常为 5.0，即满分）
+        missing_full_score: float = 5.0,
     ):
         self.caller = caller
         self.prompt_manager = prompt_manager
@@ -105,6 +118,129 @@ class LLMScorer:
         self.templater = templater or InputTemplater()
         # 当 verbose=True 时，在打分阶段输出单条推理的可视化信息
         self.verbose = verbose
+        if missing_dims_strategy not in {"fill_max", "ignore", "retry"}:
+            raise ValueError(
+                "missing_dims_strategy must be one of {'fill_max', 'ignore', 'retry'}; "
+                f"got {missing_dims_strategy!r}"
+            )
+        self.missing_dims_strategy = missing_dims_strategy
+        self.missing_full_score = missing_full_score
+
+    # === 维度对齐与缺失项处理相关工具方法 ===
+
+    def _expected_rule_ids_for_prompt(self, prompt_version: str) -> List[str] | None:
+        """根据 prompt 版本获取预期的规则项 ID 列表。
+
+        规则来源于 ``init_prompt.PROMPT_DIM_MAP``，这样当提示词发生演化时，
+        只需在 init_prompt 中更新一处即可。
+        """
+
+        dims = PROMPT_DIM_MAP.get(prompt_version)
+        if not dims:
+            return None
+        # 去重同时保持原有顺序
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for dim in dims:
+            if dim not in seen:
+                seen.add(dim)
+                ordered.append(dim)
+        return ordered
+
+    @staticmethod
+    def _extract_rule_id(check: Mapping, fallback_index: int) -> str | None:
+        """从单条规则项中抽取 rule_id，必要时退回到索引。"""
+
+        rule_id = (
+            check.get("rule_id")
+            or check.get("name")
+            or check.get("rule")
+            or None
+        )
+        if rule_id is None:
+            return str(fallback_index)
+        return str(rule_id)
+
+    def _ensure_expected_dims(
+        self,
+        parsed: Optional["Score"],
+        expected_rule_ids: Optional[List[str]],
+        *,
+        prompt_version: str,
+        sample_id: str,
+        answer_id: str,
+        source: str,
+    ) -> Optional["Score"]:
+        """确保解析结果中覆盖当前 prompt 定义的全部打分维度。
+
+        - 当 ``missing_dims_strategy == "fill_max"`` 时，对缺失维度自动补齐默认满分；
+        - 当 ``missing_dims_strategy == "ignore"`` 时，不做改动；
+        - 当 ``missing_dims_strategy == "retry"`` 时：
+          - 对缓存命中 / 纯解析场景，仅打印提示并退回到 ``fill_max`` 行为；
+          - 真正的“触发重试”逻辑在 ``_call_with_retry`` 内完成。
+        """
+
+        if parsed is None or not expected_rule_ids:
+            return parsed
+
+        present_ids: set[str] = set()
+        for idx, check in enumerate(parsed.checks):
+            if not isinstance(check, Mapping):
+                continue
+            rid = self._extract_rule_id(check, idx)
+            present_ids.add(rid)
+
+        missing = [rid for rid in expected_rule_ids if rid not in present_ids]
+        if not missing:
+            return parsed
+
+        # ignore 策略：完全按模型实际输出的维度计算，不补齐
+        if self.missing_dims_strategy == "ignore":
+            if self.verbose:
+                print(
+                    "[LLMScorer][INFO] 解析结果存在缺失维度，但按 'ignore' 策略跳过补齐："
+                    f"sample={sample_id} answer={answer_id} prompt={prompt_version} "
+                    f"missing={missing} source={source}"
+                )
+            return parsed
+
+        # "retry" 策略在缓存 / 纯解析场景无法重新调用 LLM，这里退回到 fill_max 行为，
+        # 避免因为历史缓存或离线处理而中断流水线。
+        if self.missing_dims_strategy == "retry" and self.verbose:
+            print(
+                "[LLMScorer][INFO] 解析结果存在缺失维度，但当前来源不支持重试，"
+                "退回到 'fill_max' 补齐策略："
+                f"sample={sample_id} answer={answer_id} prompt={prompt_version} "
+                f"missing={missing} source={source}"
+            )
+
+        # "fill_max" 策略：为所有缺失规则项补齐一条默认满分记录
+        new_checks: List[dict] = []
+        for idx, check in enumerate(parsed.checks):
+            if isinstance(check, Mapping):
+                # 拷贝一份，避免意外修改外部引用
+                new_checks.append(dict(check))
+            else:
+                new_checks.append({"value": check})
+
+        for rid in missing:
+            auto_check = {
+                "rule_id": rid,
+                "score": self.missing_full_score,
+                "reason": "模型未显式输出该维度，按配置使用默认满分补齐。",
+                "excerpt": "",
+                "auto_filled": True,
+            }
+            new_checks.append(auto_check)
+
+        if self.verbose:
+            print(
+                "[LLMScorer][INFO] 为缺失维度补齐默认满分："
+                f"sample={sample_id} answer={answer_id} prompt={prompt_version} "
+                f"missing={missing} source={source}"
+            )
+
+        return Score(checks=new_checks, confidence=parsed.confidence)
 
     def score_sample(
         self,
@@ -118,79 +254,57 @@ class LLMScorer:
     ) -> List[AnswerScore]:
         tpl_result = self.templater(sample)
         scores: List[AnswerScore] = []
+        expected_rule_ids = self._expected_rule_ids_for_prompt(prompt_version)
         for answer_id, answer in ("A", sample.a_answer), ("B", sample.b_answer):
             for repeat_idx in range(repeats):
-                cache_key = CacheKey(
-                    prompt_version=prompt_version,
+                raw_response: str
+                prompt = self.prompt_manager.render(
+                    prompt_version,
+                    build_prompt_variables(
+                        input_data=tpl_result.input_data,
+                        modules_block=tpl_result.modules_block,
+                        answer=answer,
+                    ),
+                )
+                # 为了提高鲁棒性，这里对大模型调用和 JSON 解析增加最多 10 次的重试机制。
+                # 在网络波动、服务端 5xx 或模型返回非 JSON 等情况下，不至于直接中断整条评估流水线。
+                raw_response, parsed = self._call_with_retry(
+                    prompt=prompt,
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
-                    query_id=sample.sample_id,
+                    seed=run_idx + repeat_idx,
+                    sample_id=sample.sample_id,
                     answer_id=answer_id,
-                    run_idx=run_idx + repeat_idx,
+                    prompt_version=prompt_version,
+                    expected_rule_ids=expected_rule_ids,
                 )
-                cached = self.cache.get(cache_key) if self.cache else None
-                raw_response: str
-
-                # 1. 命中缓存：支持两种历史格式
-                if cached is not None:
-                    if isinstance(cached, dict):
-                        # 新版：结构化缓存
-                        raw_response = str(cached.get("raw_response", ""))
-                        # 优先使用结构化 parsed 字段，还原为 Score；否则退回到重新解析 raw_response
-                        parsed = Score.from_dict(cached.get("parsed")) or self._parse_response(raw_response)
-                    else:
-                        # 旧版：仅字符串形式的 LLM 原始回复
-                        raw_response = str(cached)
-                        parsed = self._parse_response(raw_response)
-                        # 兼容迁移：在读取旧缓存时，自动升级为结构化格式，写回 cache 文件
-                        if self.cache:
-                            self.cache.set(
-                                cache_key,
-                                self._build_cache_entry(
-                                    sample=sample,
-                                    answer=answer,
-                                    answer_id=answer_id,
-                                    prompt_version=prompt_version,
-                                    temperature=temperature,
-                                    top_k=top_k,
-                                    top_p=top_p,
-                                    run_idx=run_idx + repeat_idx,
-                                    tpl_result=tpl_result,
-                                    raw_response=raw_response,
-                                    parsed=parsed,
-                                ),
-                            )
-
-                # 2. 未命中缓存：实际调用大模型并写入结构化缓存
-                else:
-                    prompt = self.prompt_manager.render(
-                        prompt_version,
-                        build_prompt_variables(
-                            input_data=tpl_result.input_data,
-                            modules_block=tpl_result.modules_block,
+                if self.cache:
+                    cache_key = CacheKey(
+                        prompt_version=prompt_version,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        query_id=sample.sample_id,
+                        answer_id=answer_id,
+                        run_idx=run_idx + repeat_idx,
+                    )
+                    self.cache.set(
+                        cache_key,
+                        self._build_cache_entry(
+                            sample=sample,
                             answer=answer,
+                            answer_id=answer_id,
+                            prompt_version=prompt_version,
+                            temperature=temperature,
+                            top_k=top_k,
+                            top_p=top_p,
+                            run_idx=run_idx + repeat_idx,
+                            tpl_result=tpl_result,
+                            raw_response=raw_response,
+                            parsed=parsed,
                         ),
                     )
-                    raw_response = self.caller(prompt, temperature, top_k, top_p, run_idx + repeat_idx)
-                    parsed = self._parse_response(raw_response)
-                    if self.cache:
-                        self.cache.set(
-                            cache_key,
-                            self._build_cache_entry(
-                                sample=sample,
-                                answer=answer,
-                                answer_id=answer_id,
-                                prompt_version=prompt_version,
-                                temperature=temperature,
-                                top_k=top_k,
-                                top_p=top_p,
-                                run_idx=run_idx + repeat_idx,
-                                tpl_result=tpl_result,
-                                raw_response=raw_response,
-                                parsed=parsed,
-                            ),
-                        )
 
                 score_obj = AnswerScore(
                     sample_id=sample.sample_id,
@@ -215,11 +329,11 @@ class LLMScorer:
                         f"[LLMScorer] sample={sample.sample_id} answer={answer_id} "
                         f"seed={seed} repeat={repeat_no}/{repeats} "
                         f"prompt={prompt_version} temp={temperature} top_k={top_k} top_p={top_p} "
-                        f"average_score={average} total_score={total} confidence={conf} | "
+                        f"average_score={average:.2f} total_score={total:.2f} confidence={conf:.2f} | "
                         f"answer_preview={preview}"
                     )
-                    print(parsed)
-
+                    # 使用 ANSI 转义序列将 parsed 的详细内容打印为灰色，便于与主日志区分。
+                    print(f"\033[90m{parsed}\033[0m")
 
         return scores
 
@@ -295,6 +409,84 @@ class LLMScorer:
         except (json.JSONDecodeError, TypeError, ValueError):
             raise ValueError(f"Failed to parse JSON response: {raw}")
         return None
+
+    def _call_with_retry(
+        self,
+        prompt: str,
+        temperature: float,
+        top_k: int | None,
+        top_p: float | None,
+        seed: int,
+        *,
+        sample_id: str,
+        answer_id: str,
+        prompt_version: str,
+        max_retries: int = 10,
+        expected_rule_ids: Optional[List[str]] = None,
+    ) -> tuple[str, Optional[Score]]:
+        """带重试的大模型调用封装。
+
+        - 最大重试 ``max_retries`` 次（包含第一次尝试）；
+        - 每次失败都会打印一条告警信息，但不中断整条评估流程；
+        - 如果始终失败，则返回 ``("", None)``，后续指标计算阶段会将其视为“无评分”样本。
+        """
+
+        last_error: Exception | None = None
+        last_raw: str = ""
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw = self.caller(prompt, temperature, top_k, top_p, seed)
+                last_raw = str(raw)
+                parsed = self._parse_response(last_raw)
+
+                # 如果模型成功返回，但遗漏了部分维度，在 "retry" 策略下可以视作一次失败，
+                # 通过抛出异常进入重试分支；否则在本轮内直接按配置补齐/忽略。
+                if expected_rule_ids:
+                    present_ids: set[str] = set()
+                    if parsed is not None:
+                        for idx, check in enumerate(parsed.checks):
+                            if not isinstance(check, Mapping):
+                                continue
+                            rid = self._extract_rule_id(check, idx)
+                            present_ids.add(rid)
+                    missing = [rid for rid in expected_rule_ids if rid not in present_ids]
+                    if missing and self.missing_dims_strategy == "retry" and attempt < max_retries:
+                        if self.verbose:
+                            print(
+                                "[LLMScorer][WARN] 模型返回中缺失部分维度，按照 'retry' 策略重试："
+                                f"sample={sample_id} answer={answer_id} prompt={prompt_version} "
+                                f"attempt={attempt}/{max_retries} missing={missing}"
+                            )
+                        raise ValueError(f"Missing dimensions in model response: {missing}")
+
+                    # 在非 retry 或最后一次重试时，按普通逻辑对缺失维度进行处理
+                    parsed = self._ensure_expected_dims(
+                        parsed,
+                        expected_rule_ids,
+                        prompt_version=prompt_version,
+                        sample_id=sample_id,
+                        answer_id=answer_id,
+                        source="llm",
+                    )
+
+                return last_raw, parsed
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                print(
+                    "[LLMScorer][WARN] 调用大模型失败："
+                    f"sample={sample_id} answer={answer_id} prompt={prompt_version} "
+                    f"attempt={attempt}/{max_retries} error={exc!r}"
+                )
+
+        # 所有重试均失败，打印最终错误并返回空结果，避免中断整体流程。
+        if last_error is not None:
+            print(
+                "[LLMScorer][WARN] 调用大模型连续失败已达上限，将跳过本次打分："
+                f"sample={sample_id} answer={answer_id} prompt={prompt_version} "
+                f"max_retries={max_retries} last_error={last_error!r}"
+            )
+        return last_raw, None
 
     def flush_cache(self) -> None:
         if self.cache:

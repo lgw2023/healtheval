@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .cache import JSONCache
 from .data_loader import CSVDataLoader, Sample
@@ -20,9 +21,14 @@ class EvaluationPipeline:
         data_path: Path,
         caller: Callable,
         cache_path: Path | None = None,
+        *,
         prompt_manager: PromptManager | None = None,
         templater: InputTemplater | None = None,
         verbose: bool = False,
+        max_workers: int | None = None,
+        # 传递给 LLMScorer 的缺失维度处理策略，含义同 LLMScorer.__init__。
+        missing_dims_strategy: str = "fill_max",
+        missing_full_score: float = 5.0,
     ):
         self.loader = CSVDataLoader(data_path)
         self.cache = JSONCache(cache_path) if cache_path else None
@@ -34,7 +40,11 @@ class EvaluationPipeline:
             cache=self.cache,
             templater=templater,
             verbose=verbose,
+            missing_dims_strategy=missing_dims_strategy,
+            missing_full_score=missing_full_score,
         )
+        # 控制并发调用大模型的线程数；为 None 或 <=1 时退回到串行模式
+        self.max_workers = max_workers if (max_workers or 0) > 1 else None
         # 当 verbose=True 时，也在指标统计阶段输出 task.md 中三类指标的详细计算过程
         self.report_builder = ReportBuilder(debug_metrics=verbose)
 
@@ -104,48 +114,86 @@ class EvaluationPipeline:
                     f"round={current_round}/1 seed={seed}"
                 )
 
-            for idx, sample in enumerate(samples, start=1):
-                if self.verbose and (idx == 1 or idx == total_samples or idx % 10 == 0):
-                    # 每隔一定间隔打印一次样本进度
-                    print(
-                        f"[Pipeline]  scoring sample {idx}/{total_samples} "
-                        f"(id={sample.sample_id}) for prompt={config.prompt_version}"
-                    )
+            # 如果设置了 max_workers，则对单个配置内的样本进行并发打分；
+            # 否则退回到原来的串行逻辑，保持完全兼容。
+            if self.max_workers:
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    future_to_meta = {}
+                    for idx, sample in enumerate(samples, start=1):
+                        future = executor.submit(
+                            self.scorer.score_sample,
+                            sample,
+                            config.prompt_version,
+                            config.temperature,
+                            config.top_k,
+                            config.top_p,
+                            seed,
+                            # repeats 用于同一 (sample, answer) 的多次打分，从而支撑单条打分稳定性 (α)
+                            repeats,
+                        )
+                        future_to_meta[future] = (idx, sample.sample_id)
 
-                grouped_answers.setdefault(config, []).extend(
-                    self.scorer.score_sample(
-                        sample,
-                        prompt_version=config.prompt_version,
-                        temperature=config.temperature,
-                        top_k=config.top_k,
-                        top_p=config.top_p,
-                        run_idx=seed,
-                        # repeats 用于同一 (sample, answer) 的多次打分，从而支撑单条打分稳定性 (α)
-                        repeats=repeats,
+                    for future in as_completed(future_to_meta):
+                        idx, sample_id = future_to_meta[future]
+                        if self.verbose and (idx == 1 or idx == total_samples or idx % 10 == 0):
+                            print(
+                                f"[Pipeline]  scoring sample {idx}/{total_samples} "
+                                f"(id={sample_id}) for prompt={config.prompt_version}"
+                            )
+                        answers = future.result()
+                        grouped_answers.setdefault(config, []).extend(answers)
+            else:
+                for idx, sample in enumerate(samples, start=1):
+                    if self.verbose and (idx == 1 or idx == total_samples or idx % 10 == 0):
+                        # 每隔一定间隔打印一次样本进度
+                        print(
+                            f"[Pipeline]  scoring sample {idx}/{total_samples} "
+                            f"(id={sample.sample_id}) for prompt={config.prompt_version}"
+                        )
+
+                    grouped_answers.setdefault(config, []).extend(
+                        self.scorer.score_sample(
+                            sample,
+                            prompt_version=config.prompt_version,
+                            temperature=config.temperature,
+                            top_k=config.top_k,
+                            top_p=config.top_p,
+                            run_idx=seed,
+                            # repeats 用于同一 (sample, answer) 的多次打分，从而支撑单条打分稳定性 (α)
+                            repeats=repeats,
+                        )
                     )
-                )
 
         reports: dict[DecodeConfig, EvaluationReport] = {}
-        for config, answers in grouped_answers.items():
-            if self.verbose:
-                print(
-                    f"[Pipeline] Building report for prompt={config.prompt_version} "
-                    f"temp={config.temperature} top_k={config.top_k} top_p={config.top_p} "
-                    f"answers={len(answers)}"
-                )
-            reports[config] = self.report_builder.summarize(answers)
-
-        # If weights are provided (defaulting to ground:structure = 2:1),
-        # aggregate the prompt-specific answers into a single weighted report.
         weight_map = combine_weights or {"ground": 2.0, "structure": 1.0}
-        if weight_map:
-            combined_answers = self._combine_weighted_answers(grouped_answers, weight_map)
-            if self.verbose:
-                print(
-                    f"[Pipeline] Building weighted combined report using weights: {weight_map} "
-                    f"answers={len(combined_answers)}"
-                )
-            reports["weighted_combined"] = self.report_builder.summarize(combined_answers)
+
+        # 为 Krippendorff’s α 准备「原始评分集合」：
+        # 直接使用各个 prompt 版本（如 GROUND_PROMPT_TPL / STRUCT_PROMPT_TPL）
+        # 的逐规则打分结果，而不是加权融合后的总分。
+        raw_answers_for_alpha: List[AnswerScore] = []
+        for cfg_answers in grouped_answers.values():
+            raw_answers_for_alpha.extend(cfg_answers)
+
+        combined_answers, weight_debug = self._combine_weighted_answers(
+            grouped_answers,
+            weight_map,
+            debug=self.verbose,
+        )
+        if self.verbose:
+            print(
+                f"[Pipeline] Building weighted combined report using weights: {weight_map} "
+                f"answers={len(combined_answers)}"
+            )
+        # 注意：
+        # - α 基于原始 prompt 的逐规则打分；
+        # - pair-accuracy / Alt-Test 仍基于加权结果；
+        # - 为了便于阅读，将「加权融合：原始 prompt 得分与权重贡献」的可视化日志
+        #   放在 Krippendorff α 之后统一打印，因此这里将 weight_debug 传递给 ReportBuilder。
+        reports["weighted_combined"] = self.report_builder.summarize(
+            combined_answers,
+            answers_for_alpha=raw_answers_for_alpha,
+            weight_debug=weight_debug,
+        )
         if self.cache:
             self.cache.flush()
         return reports
@@ -154,7 +202,8 @@ class EvaluationPipeline:
     def _combine_weighted_answers(
         grouped_answers: dict[DecodeConfig, List[AnswerScore]],
         weights: Mapping[str, float],
-    ) -> List[AnswerScore]:
+        debug: bool = False,
+    ) -> tuple[List[AnswerScore], list] | tuple[List[AnswerScore], None]:
         """Merge answers from multiple prompt versions via weighted averaging.
 
         The weighted score is computed as::
@@ -171,10 +220,15 @@ class EvaluationPipeline:
                 combined.setdefault(key, {})[ans.prompt_version] = ans
 
         merged_scores: List[AnswerScore] = []
+        # 收集用于后续统一打印的加权融合中间结果（仅在 debug=True 时使用）
+        debug_info: list | None = [] if debug else None
         for _, prompt_answers in combined.items():
             weighted_total = 0.0
             weighted_confidence = 0.0
             total_weight = 0.0
+
+            # 为可视化加权过程准备中间日志
+            debug_rows: List[tuple[str, float, float, float]] = [] if debug else None
 
             for prompt, ans in prompt_answers.items():
                 weight = weights.get(prompt, 0.0)
@@ -184,6 +238,10 @@ class EvaluationPipeline:
                 weighted_total += weight * avg_score
                 weighted_confidence += weight * (ans.parsed.confidence or 0.0)
                 total_weight += weight
+
+                if debug and debug_rows is not None:
+                    contrib = weight * avg_score
+                    debug_rows.append((prompt, weight, avg_score, contrib))
 
             if total_weight == 0:
                 continue
@@ -209,4 +267,18 @@ class EvaluationPipeline:
                 )
             )
 
-        return merged_scores
+            # 在 verbose / debug 模式下先缓存当前样本的加权计算细节，
+            # 由 ReportBuilder 在 Krippendorff α 之后统一打印。
+            if debug and debug_rows and debug_info is not None:
+                meta = (any_answer.sample_id, any_answer.answer_id, any_answer.run_idx)
+                debug_info.append(
+                    (
+                        meta,
+                        debug_rows,
+                        final_score,
+                        weighted_total,
+                        total_weight,
+                    )
+                )
+
+        return merged_scores, debug_info

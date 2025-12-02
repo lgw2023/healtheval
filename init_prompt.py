@@ -44,28 +44,28 @@ GROUND_PROMPT_TPL = """
    - **等级判定**：若有 score_thresholds，必须按阈值严格判定等级（poor/fair/good等），不得自造结论。
 
 ## 评分维度（仅对以下规则进行 check）
-1. **PERSONAL_DATA_MISMATCH** 【strict】
+1. **PERSONAL_DATA_MISMATCH** 
    - 答案中引用的个人数据数值、单位、指标名称与模块不符。
    - 睡眠时长计算错误、等级判定与阈值不符。
    - 捏造了模块中不存在的数据。
-2. **COURSE_LIB_MISSING** 【strict】
+2. **COURSE_LIB_MISSING** 
    - 使用了 `<...>` 引用课程，但在[课程库]中找不到对应条目。
    - 错误引用了不存在的 Service 或课程名称。
-3. **NUM_COMPARE_ERROR** 【strict】
+3. **NUM_COMPARE_ERROR** 
    - 数值比较逻辑错误（如：实际值50，阈值100，却说“高于阈值”）。
    - 请在 reason 中写明你的验算过程。
-4. **ARITH_ERROR** 【strict】
+4. **ARITH_ERROR** 
    - 简单的数学计算错误（加减乘除、百分比、时间差计算）。
    - 请在 reason 中写明你的验算过程。
-5. **CONTRADICT_KB_OR_EXPERT** 【lenient: minor/major】
+5. **CONTRADICT_KB_OR_EXPERT** 
    - 与[专家建议]或[知识库知识]的内容直接矛盾。
    - 引用了模块中不存在的知识（幻觉）。
-6. **FACT_LOGIC_ISSUE** 【lenient: minor/major】
+6. **FACT_LOGIC_ISSUE** 【
    - **过度发散**：回答内容虽未完全错误，但明显偏离问题核心，废话连篇。
    - 事实性错误（如时间逻辑混乱：昨晚睡了30小时）。
    - 前后结论自相矛盾。
    - 建议明显违背常理或数据结论。
-7. **IRRELEVANT** 【strict】
+7. **IRRELEVANT** 
    - 答案内容与用户提问完全无关（答非所问，根本性错误）。
 
 ## 仅输出 JSON（单个对象，不要多余文本）
@@ -77,17 +77,27 @@ GROUND_PROMPT_TPL = """
 **  - 5 分：完全符合、无明显问题**
 {
   "checks": [
-    {"rule_id":"PERSONAL_DATA_MISMATCH","score":0~5,"severity":"strict","reason":"(若含引号请用单引号)","excerpt":"(若含引号请用单引号)"},
-    {"rule_id":"COURSE_LIB_MISSING","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"NUM_COMPARE_ERROR","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"ARITH_ERROR","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"CONTRADICT_KB_OR_EXPERT","score":0~5,"severity":"minor|major","reason":"...","excerpt":"..."},
-    {"rule_id":"FACT_LOGIC_ISSUE","score":0~5,"severity":"minor|major","reason":"...","excerpt":"..."},
-    {"rule_id":"IRRELEVANT","score":0~5,"severity":"strict","reason":"...","excerpt":"..."}
+    {"rule_id":"PERSONAL_DATA_MISMATCH","score":0~5,"reason":"(若含引号请用单引号)","excerpt":"(若含引号请用单引号)"},
+    {"rule_id":"COURSE_LIB_MISSING","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"NUM_COMPARE_ERROR","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"ARITH_ERROR","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"CONTRADICT_KB_OR_EXPERT","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"FACT_LOGIC_ISSUE","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"IRRELEVANT","score":0~5,"reason":"...","excerpt":"..."}
   ],
   "confidence": <0~1 的数字>
 }
 """
+
+GROUND_PROMPT_DIM = [
+    "PERSONAL_DATA_MISMATCH",
+    "COURSE_LIB_MISSING",
+    "NUM_COMPARE_ERROR",
+    "ARITH_ERROR",
+    "CONTRADICT_KB_OR_EXPERT",
+    "FACT_LOGIC_ISSUE",
+    "IRRELEVANT",
+]
 
 STRUCT_PROMPT_TPL = """
 ## 任务说明
@@ -123,10 +133,10 @@ STRUCT_PROMPT_TPL = """
 5. **完整性与合规**：覆盖提问点，无敏感违规内容（包含违法/色情/暴力内容，遇到敏感话题（政治/宗教/管制药物）必须回避或给出合规提示）。
 
 ## 评分维度（仅对以下规则进行 check）
-1. **EMPTY_OR_INCOMPLETE** 【strict】
+1. **EMPTY_OR_INCOMPLETE** 
    - 答案为空，或明显未完成。
    - 遗漏了题目要求的关键输出项。
-2. **ILLEGAL_CONTENT** / **SENSITIVE_ADVICE** 【strict】
+2. **ILLEGAL_CONTENT** / **SENSITIVE_ADVICE** 
    - 包含违法、色情、暴力内容；或对敏感话题给出不当建议。
 3. **NO_MARKDOWN** 【fixed】
    - 全文无分段、无标题、无列表，排版混乱（纯文本堆砌）。
@@ -154,19 +164,41 @@ STRUCT_PROMPT_TPL = """
 **  - 5 分：结构完整、排版良好、体验优良**
 {
   "checks": [
-    {"rule_id":"EMPTY_OR_INCOMPLETE","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"ILLEGAL_CONTENT","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"SENSITIVE_ADVICE","score":0~5,"severity":"strict","reason":"...","excerpt":"..."},
-    {"rule_id":"NO_MARKDOWN","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."},
-    {"rule_id":"BAD_MARKDOWN_USAGE","score":0~5,"severity":"fixed","reason":"格式错误/效果差","excerpt":"..."},
-    {"rule_id":"BURIED_CORE_ANSWER","score":0~5,"severity":"fixed","reason":"核心结论未前置","excerpt":"..."},
-    {"rule_id":"UNNATURAL_TONE","score":0~5,"severity":"fixed","reason":"语气生硬/缺乏拟人化","excerpt":"..."},
-    {"rule_id":"LACK_VISUAL_AID","score":0~5,"severity":"fixed","reason":"缺乏Emoji/图表丰富度","excerpt":"..."},
-    {"rule_id":"THIN_CONTENT","score":0~5,"severity":"fixed","reason":"内容单薄/丰富度不足","excerpt":"..."},
-    {"rule_id":"PERSONAL_DATA_ANALYSIS_ISSUE","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."},
-    {"rule_id":"REDUNDANT","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."},
-    {"rule_id":"GRAMMAR","score":0~5,"severity":"fixed","reason":"...","excerpt":"..."}
+    {"rule_id":"EMPTY_OR_INCOMPLETE","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"ILLEGAL_CONTENT","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"SENSITIVE_ADVICE","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"NO_MARKDOWN","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"BAD_MARKDOWN_USAGE","score":0~5,"reason":"格式错误/效果差","excerpt":"..."},
+    {"rule_id":"BURIED_CORE_ANSWER","score":0~5,"reason":"核心结论未前置","excerpt":"..."},
+    {"rule_id":"UNNATURAL_TONE","score":0~5,"reason":"语气生硬/缺乏拟人化","excerpt":"..."},
+    {"rule_id":"LACK_VISUAL_AID","score":0~5,"reason":"缺乏Emoji/图表丰富度","excerpt":"..."},
+    {"rule_id":"THIN_CONTENT","score":0~5,"reason":"内容单薄/丰富度不足","excerpt":"..."},
+    {"rule_id":"PERSONAL_DATA_ANALYSIS_ISSUE","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"REDUNDANT","score":0~5,"reason":"...","excerpt":"..."},
+    {"rule_id":"GRAMMAR","score":0~5,"reason":"...","excerpt":"..."}
   ],
   "confidence": <0~1 的数字>
 }
 """
+
+STRUCT_PROMPT_DIM = [
+    "EMPTY_OR_INCOMPLETE",
+    "ILLEGAL_CONTENT",
+    "SENSITIVE_ADVICE",
+    "NO_MARKDOWN",
+    "BAD_MARKDOWN_USAGE",
+    "BURIED_CORE_ANSWER",
+    "UNNATURAL_TONE",
+    "LACK_VISUAL_AID",
+    "THIN_CONTENT",
+    "PERSONAL_DATA_ANALYSIS_ISSUE",
+    "REDUNDANT",
+    "GRAMMAR",
+]
+
+# 将不同 prompt 版本与各自的规则维度进行集中注册，便于在解析阶段做「维度对齐」。
+# 如果后续增加新的评估 prompt，只需在此处补充映射即可。
+PROMPT_DIM_MAP = {
+    "ground": GROUND_PROMPT_DIM,
+    "structure": STRUCT_PROMPT_DIM,
+}

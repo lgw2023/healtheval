@@ -72,9 +72,18 @@
 
 1. 对每条样本，在每次运行中：
 
-   * 计算总分：`score_A = sum(dim_scores_A)`，`score_B = sum(dim_scores_B)`。
-   * 决策：
+   * 计算均分：
+      `prompt1_score_A = sum(prompt1_dim_scores_A)/prompt1_n_dims`，`prompt1_score_B = sum(prompt1_dim_scores_B)/prompt1_n_dims`
+      `prompt2_score_A = sum(prompt2_dim_scores_A)/prompt2_n_dims`，`prompt2_score_B = sum(prompt2_dim_scores_B)/prompt2_n_dims`
+      ...
+      `promptN_score_A = sum(promptN_dim_scores_A)/promptN_n_dims`，`promptN_score_B = sum(promptN_dim_scores_B)/promptN_n_dims`
 
+   * 计算加权分：
+      `weight = {'prompt1':2, 'prompt2':1, ..., 'promptN':x}`
+      `score_A = sum(prompt1_score_A * 2 + prompt2_score_A * 1 + ... + promptN_score_A * x)/(2+1+...+x)`
+      `score_B = sum(prompt1_score_A * 2 + prompt2_score_A * 1 + ... + promptN_score_A * x)/(2+1+...+x)`
+
+   * 决策：
      * 如果 `score_A > score_B` → `llm_winner = A`
      * 如果 `score_B > score_A` → `llm_winner = B`
      * 如果相等，可以记为“平局”或随机 / 视为不一致（最好单独统计平局率）。

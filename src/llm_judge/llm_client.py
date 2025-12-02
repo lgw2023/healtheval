@@ -19,22 +19,40 @@ class LLMEnvConfig:
     api_key: str
 
     @classmethod
-    def from_env(cls) -> "LLMEnvConfig":
-        url = os.getenv("LLM_MODEL_URL")
-        model = os.getenv("LLM_MODEL_NAME")
-        api_key = os.getenv("LLM_MODEL_API_KEY")
+    def from_env(cls, profile: Optional[str] = None) -> "LLMEnvConfig":
+        """从环境变量加载一组模型配置。
+
+        - 默认（profile 为 None 或 "default"）：
+          使用 `LLM_MODEL_URL` / `LLM_MODEL_NAME` / `LLM_MODEL_API_KEY`
+        - 指定 profile（例如 "deepinfra"）：
+          使用 `LLM_MODEL_DEEPINFRA_URL` / `LLM_MODEL_DEEPINFRA_NAME` / `LLM_MODEL_DEEPINFRA_API_KEY`
+        """
+        if profile and profile.lower() != "default":
+            suffix = profile.upper()
+            url_key = f"LLM_MODEL_{suffix}_URL"
+            model_key = f"LLM_MODEL_{suffix}_NAME"
+            api_key_key = f"LLM_MODEL_{suffix}_API_KEY"
+        else:
+            url_key = "LLM_MODEL_URL"
+            model_key = "LLM_MODEL_NAME"
+            api_key_key = "LLM_MODEL_API_KEY"
+
+        url = os.getenv(url_key)
+        model = os.getenv(model_key)
+        api_key = os.getenv(api_key_key)
         if not all([url, model, api_key]):
             missing = [
                 name
                 for name, value in [
-                    ("LLM_MODEL_URL", url),
-                    ("LLM_MODEL_NAME", model),
-                    ("LLM_MODEL_API_KEY", api_key),
+                    (url_key, url),
+                    (model_key, model),
+                    (api_key_key, api_key),
                 ]
                 if not value
             ]
             raise EnvironmentError(
-                f"Missing environment variables for LLM caller: {', '.join(missing)}"
+                "Missing environment variables for LLM caller "
+                f"(profile={profile or 'default'}): {', '.join(missing)}"
             )
         return cls(url=url, model=model, api_key=api_key)
 
@@ -163,9 +181,13 @@ class MockLLMCaller:
         return json.dumps(payload, ensure_ascii=False)
 
 
-def build_llm_caller(mock: bool = False, timeout: int = 120) -> LLMCaller:
+def build_llm_caller(
+    mock: bool = False,
+    timeout: int = 120,
+    model_config: Optional[str] = None,
+) -> LLMCaller:
     if mock:
         return MockLLMCaller()
-    config = LLMEnvConfig.from_env()
+    config = LLMEnvConfig.from_env(profile=model_config)
     return OpenAILikeCaller(config, timeout=timeout)
 
