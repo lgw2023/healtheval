@@ -140,12 +140,20 @@ class EvaluationPipeline:
         weight_map = combine_weights or {"ground": 2.0, "structure": 1.0}
         if weight_map:
             combined_answers = self._combine_weighted_answers(grouped_answers, weight_map)
+            # 单条打分稳定性仍然基于原始的逐 prompt 打分结果，成对比较则使用权重加和后的总分
+            stability_answers: List[AnswerScore] = []
+            for cfg, answers in grouped_answers.items():
+                if cfg.prompt_version in weight_map:
+                    stability_answers.extend(answers)
+
             if self.verbose:
                 print(
                     f"[Pipeline] Building weighted combined report using weights: {weight_map} "
                     f"answers={len(combined_answers)}"
                 )
-            reports["weighted_combined"] = self.report_builder.summarize(combined_answers)
+            reports["weighted_combined"] = self.report_builder.summarize_from_separate_sources(
+                stability_source=stability_answers, decision_source=combined_answers
+            )
         if self.cache:
             self.cache.flush()
         return reports
